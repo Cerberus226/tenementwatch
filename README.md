@@ -23,5 +23,18 @@ Auth via `X-API-Key` header. Tiers: free 100/day, starter 1000/day, pro 10000/da
 - Start: `python server.py --seed-if-empty`
 - Env: `PORT` is set automatically by Render.
 
+Required env vars (Render dashboard → Environment → Add Environment Variable):
+- `BOOTSTRAP_API_KEY` — a fixed API key (pro tier) that survives redeploys.
+  Without at least one key the API is unusable, since SQLite is wiped on deploy.
+- `ADMIN_KEY` — master key for the `POST /keys` mint endpoint.
+
+Mint keys remotely (no Shell needed):
+```bash
+curl -X POST https://<host>/keys \
+  -H "X-Admin-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"acme","tier":"starter"}'
+```
+
 Data is stored in `tenements.db` (SQLite). On Render's free tier the disk is
-ephemeral, so `--seed-if-empty` re-fetches on cold boot.
+ephemeral, so `--seed-if-empty` re-fetches on cold boot. The `changes` table
+(change history) is also reset on every redeploy.

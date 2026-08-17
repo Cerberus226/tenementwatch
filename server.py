@@ -12,6 +12,8 @@ import os
 import sqlite3
 import sys
 import signal
+import secrets
+import threading
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional
@@ -80,6 +82,21 @@ def init_db():
     """)
     c.commit()
     c.close()
+
+def seed_bootstrap_keys():
+    """Ensure a bootstrap API key from the BOOTSTRAP_API_KEY env var exists."""
+    key = os.environ.get("BOOTSTRAP_API_KEY", "").strip()
+    if not key:
+        return
+    c = db()
+    if c.execute("SELECT key FROM api_keys WHERE key=?", (key,)).fetchone():
+        c.close()
+        return
+    c.execute("INSERT INTO api_keys(key, name, tier, created_at) VALUES(?,?,?,?)",
+              (key, "bootstrap", "pro", datetime.now(timezone.utc).isoformat()))
+    c.commit()
+    c.close()
+    print("[boot] seeded bootstrap API key (pro tier)")
 
 # ── Scraper ─────────────────────────────────────────────────────
 
@@ -336,6 +353,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
+        if path == "/keys":
+            return self._handle_mint_key()
         if path.startswith("/refresh/"):
             if self._auth() is None:
                 return
@@ -352,6 +371,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def _handle_mint_key(self):
+        admin = os.environ.get("ADMIN_KEY", "").strip()
+        if not admin or self.headers.get("X-Admin-Key", "").strip() != admin:
+            return self._json({"error": "Unauthorized"}, 401)
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw.decode() or "{}")
+        except Exception:
+            return self._json({"error": "Invalid JSON body"}, 400)
+        name = str(body.get("name", "")).strip()
+        tier = str(body.get("tier", "free")).strip().lower()
+        if not name:
+            return self._json({"error": "name is required"}, 400)
+        if tier not in TIERS:
+            return self._json({"error": "tier must be free|starter|pro"}, 400)
+        key = "tw_" + secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc).isoformat()
+        c = db()
+        c.execute("INSERT INTO api_keys(key, name, tier, created_at) VALUES(?,?,?,?)",
+                  (key, name, tier, now))
+        c.commit()
+        c.close()
+        return self._json({"name": name, "tier": tier, "key": key})
 
     def _handle_tenements(self, params):
         c = db()
@@ -421,6 +465,19 @@ async def fetch_both():
     print(f"  QLD: {ql}")
     return wa, ql
 
+def _seed_background():
+    try:
+        c = db()
+        n = c.execute("SELECT COUNT(*) FROM tenements").fetchone()[0]
+        c.close()
+        if n == 0:
+            print("[boot] DB empty — seeding WA + QLD in background...")
+            asyncio.run(fetch_both())
+        else:
+            print(f"[boot] DB has {n} tenements — skipping seed")
+    except Exception as e:
+        print(f"[boot] seed error: {e}")
+
 def main():
     port = int(os.environ.get("PORT", "8000"))
     if "--port" in sys.argv:
@@ -428,17 +485,12 @@ def main():
 
     init_db()
 
+    seed_bootstrap_keys()
+
     if "--refresh" in sys.argv:
         asyncio.run(fetch_both())
     elif "--seed-if-empty" in sys.argv:
-        c = db()
-        n = c.execute("SELECT COUNT(*) FROM tenements").fetchone()[0]
-        c.close()
-        if n == 0:
-            print("[boot] DB empty — seeding WA + QLD...")
-            asyncio.run(fetch_both())
-        else:
-            print(f"[boot] DB has {n} tenements — skipping seed")
+        threading.Thread(target=_seed_background, daemon=True).start()
 
     server = http.server.HTTPServer(("0.0.0.0", port), Handler)
     print(f"\n  TenementWatch API v0.1.0")

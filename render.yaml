@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: tenementwatch
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py --seed-if-empty
+    autoDeploy: true
